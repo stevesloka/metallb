@@ -3,8 +3,8 @@ package k8s
 import (
 	"time"
 
-	"k8s.io/client-go/tools/leaderelection"
-	"k8s.io/client-go/tools/leaderelection/resourcelock"
+	"k8s.io/client-go/v6/tools/leaderelection"
+	"k8s.io/client-go/v6/tools/leaderelection/resourcelock"
 )
 
 // HandleLeadership starts a leader election and notifies handler of

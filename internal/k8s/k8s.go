@@ -12,14 +12,14 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/fields"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/scheme"
-	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
-	"k8s.io/client-go/tools/cache"
-	"k8s.io/client-go/tools/clientcmd"
-	"k8s.io/client-go/tools/leaderelection"
-	"k8s.io/client-go/tools/record"
-	"k8s.io/client-go/util/workqueue"
+	"k8s.io/client-go/v6/kubernetes"
+	"k8s.io/client-go/v6/kubernetes/scheme"
+	v1core "k8s.io/client-go/v6/kubernetes/typed/core/v1"
+	"k8s.io/client-go/v6/tools/cache"
+	"k8s.io/client-go/v6/tools/clientcmd"
+	"k8s.io/client-go/v6/tools/leaderelection"
+	"k8s.io/client-go/v6/tools/record"
+	"k8s.io/client-go/v6/util/workqueue"
 )
 
 // Client watches a Kubernetes cluster and translates events into

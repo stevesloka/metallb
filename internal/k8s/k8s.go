@@ -8,13 +8,21 @@ import (
 	"fmt"
 	"net/http"
 
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
+	"k8s.io/client-go/dynamic/dynamicinformer"
+
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+
 	"go.universe.tf/metallb/internal/config"
 
 	"github.com/go-kit/kit/log"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	v1core "k8s.io/client-go/kubernetes/typed/core/v1"
@@ -23,6 +31,7 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
+	gatewayapi_v1alpha1 "sigs.k8s.io/gateway-api/apis/v1alpha1"
 )
 
 // Client watches a Kubernetes cluster and translates events into
@@ -30,18 +39,21 @@ import (
 type Client struct {
 	logger log.Logger
 
-	client *kubernetes.Clientset
-	events record.EventRecorder
-	queue  workqueue.RateLimitingInterface
+	client        *kubernetes.Clientset
+	dynamicClient dynamic.Interface
+	events        record.EventRecorder
+	queue         workqueue.RateLimitingInterface
 
-	svcIndexer   cache.Indexer
-	svcInformer  cache.Controller
-	epIndexer    cache.Indexer
-	epInformer   cache.Controller
-	cmIndexer    cache.Indexer
-	cmInformer   cache.Controller
-	nodeIndexer  cache.Indexer
-	nodeInformer cache.Controller
+	svcIndexer      cache.Indexer
+	svcInformer     cache.Controller
+	epIndexer       cache.Indexer
+	epInformer      cache.Controller
+	cmIndexer       cache.Indexer
+	cmInformer      cache.Controller
+	nodeIndexer     cache.Indexer
+	nodeInformer    cache.Controller
+	gatewayIndexer  cache.Indexer
+	gatewayInformer cache.Controller
 
 	syncFuncs []cache.InformerSynced
 
@@ -49,6 +61,8 @@ type Client struct {
 	configChanged  func(log.Logger, *config.Config) SyncState
 	nodeChanged    func(log.Logger, *v1.Node) SyncState
 	synced         func(log.Logger)
+
+	gatewayChanged func(log.Logger, *gatewayapi_v1alpha1.Gateway) SyncState
 }
 
 // SyncState is the result of calling synchronization callbacks.
@@ -82,6 +96,8 @@ type Config struct {
 	ConfigChanged  func(log.Logger, *config.Config) SyncState
 	NodeChanged    func(log.Logger, *v1.Node) SyncState
 	Synced         func(log.Logger)
+
+	GatewayChanged func(log.Logger, *gatewayapi_v1alpha1.Gateway) SyncState
 }
 
 type svcKey string
@@ -114,6 +130,11 @@ func New(cfg *Config) (*Client, error) {
 	clientset, err := kubernetes.NewForConfig(k8sConfig)
 	if err != nil {
 		return nil, fmt.Errorf("creating Kubernetes client: %s", err)
+	}
+
+	dynamicClient, err := dynamic.NewForConfig(k8sConfig)
+	if err != nil {
+		return nil, fmt.Errorf("creating dymamic Kubernetes client: %s", err)
 	}
 
 	broadcaster := record.NewBroadcaster()
@@ -233,6 +254,7 @@ func New(cfg *Config) (*Client, error) {
 				}
 			},
 		}
+
 		nodeWatcher := cache.NewListWatchFromClient(c.client.CoreV1().RESTClient(), "nodes", v1.NamespaceAll, fields.OneTermEqualSelector("metadata.name", cfg.NodeName))
 		c.nodeIndexer, c.nodeInformer = cache.NewIndexerInformer(nodeWatcher, &v1.Node{}, 0, nodeHandlers, cache.Indexers{})
 
@@ -242,6 +264,60 @@ func New(cfg *Config) (*Client, error) {
 
 	if cfg.Synced != nil {
 		c.synced = cfg.Synced
+	}
+
+	if cfg.GatewayChanged != nil {
+
+		s := runtime.NewScheme()
+
+		gatewayHandlers := cache.ResourceEventHandlerFuncs{
+			AddFunc: func(obj interface{}) {
+				converted, _ := FromUnstructured(obj, s)
+				switch obj := converted.(type) {
+				case *gatewayapi_v1alpha1.Gateway:
+					c.queue.Add(obj)
+				}
+
+			},
+			UpdateFunc: func(old interface{}, new interface{}) {
+				converted, _ := FromUnstructured(new, s)
+				switch obj := converted.(type) {
+				case *gatewayapi_v1alpha1.Gateway:
+					c.queue.Add(obj)
+				}
+			},
+			DeleteFunc: func(obj interface{}) {
+				converted, _ := FromUnstructured(obj, s)
+				switch obj := converted.(type) {
+				case *gatewayapi_v1alpha1.Gateway:
+					c.queue.Add(obj)
+				}
+			},
+		}
+
+		gvr := schema.GroupVersionResource{
+			Group:    gatewayapi_v1alpha1.GroupVersion.Group,
+			Version:  gatewayapi_v1alpha1.GroupVersion.Version,
+			Resource: "gateways",
+		}
+
+		schemeGroupVersion := schema.GroupVersion{Group: gatewayapi_v1alpha1.GroupVersion.Group, Version: gatewayapi_v1alpha1.GroupVersion.Version}
+
+		s.AddKnownTypes(schemeGroupVersion, &gatewayapi_v1alpha1.Gateway{}, &gatewayapi_v1alpha1.GatewayList{})
+		metav1.AddToGroupVersion(s, schemeGroupVersion)
+
+		err = gatewayapi_v1alpha1.AddToScheme(s)
+		if err != nil {
+			panic("unable to add Gateway API to scheme.")
+		}
+
+		f := dynamicinformer.NewFilteredDynamicSharedInformerFactory(dynamicClient, 0, v1.NamespaceAll, nil)
+		genericInformer := f.ForResource(gvr)
+		c.gatewayInformer = genericInformer.Informer()
+		genericInformer.Informer().AddEventHandler(gatewayHandlers)
+
+		c.gatewayChanged = cfg.GatewayChanged
+		c.syncFuncs = append(c.syncFuncs, c.gatewayInformer.HasSynced)
 	}
 
 	http.Handle("/metrics", promhttp.Handler())
@@ -329,6 +405,9 @@ func (c *Client) Run(stopCh <-chan struct{}) error {
 	if c.svcInformer != nil {
 		go c.svcInformer.Run(stopCh)
 	}
+	if c.gatewayInformer != nil {
+		go c.gatewayInformer.Run(stopCh)
+	}
 	if c.epInformer != nil {
 		go c.epInformer.Run(stopCh)
 	}
@@ -372,13 +451,18 @@ func (c *Client) Run(stopCh <-chan struct{}) error {
 	}
 }
 
-// ForceSync reprocess all watched services
+// ForceSync reprocess all watched services & gateways
 func (c *Client) ForceSync() {
 	if c.svcIndexer != nil {
 		for _, k := range c.svcIndexer.ListKeys() {
 			c.queue.AddRateLimited(svcKey(k))
 		}
 	}
+	//if c.gatewayIndexer != nil {
+	//	for _, k := range c.gatewayIndexer.ListKeys() {
+	//		c.queue.AddRateLimited(gatewayKey(k))
+	//	}
+	//}
 }
 
 // UpdateStatus writes the protected "status" field of svc back into
@@ -427,6 +511,10 @@ func (c *Client) sync(key interface{}) SyncState {
 		}
 
 		return c.serviceChanged(l, string(k), svc.(*v1.Service), eps)
+
+	case *gatewayapi_v1alpha1.Gateway:
+		l := log.With(c.logger, "gateway", k.Name)
+		return c.gatewayChanged(l, k)
 
 	case cmKey:
 		l := log.With(c.logger, "configmap", string(k))
@@ -488,4 +576,20 @@ func (c *Client) sync(key interface{}) SyncState {
 	default:
 		panic(fmt.Errorf("unknown key type for %#v (%T)", key, key))
 	}
+}
+
+// FromUnstructured converts an unstructured.Unstructured to typed struct. If obj
+// is not an unstructured.Unstructured it is returned without further processing.
+func FromUnstructured(obj interface{}, scheme *runtime.Scheme) (interface{}, error) {
+	u, ok := obj.(*unstructured.Unstructured)
+	if !ok {
+		return obj, nil
+	}
+
+	newObj, err := scheme.New(u.GetObjectKind().GroupVersionKind())
+	if err != nil {
+		return nil, err
+	}
+
+	return newObj, scheme.Convert(obj, newObj, nil)
 }

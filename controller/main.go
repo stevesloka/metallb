@@ -21,6 +21,8 @@ import (
 	"os"
 	"reflect"
 
+	gatewayapi_v1alpha1 "sigs.k8s.io/gateway-api/apis/v1alpha1"
+
 	"go.universe.tf/metallb/internal/allocator"
 	"go.universe.tf/metallb/internal/config"
 	"go.universe.tf/metallb/internal/k8s"
@@ -28,7 +30,7 @@ import (
 	"go.universe.tf/metallb/internal/version"
 
 	"github.com/go-kit/kit/log"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 )
 
 // Service offers methods to mutate a Kubernetes service object.
@@ -159,6 +161,7 @@ func main() {
 		Kubeconfig:    *kubeconfig,
 
 		ServiceChanged: c.SetBalancer,
+		GatewayChanged: c.SetGateway,
 		ConfigChanged:  c.SetConfig,
 		Synced:         c.MarkSynced,
 	})
@@ -179,4 +182,11 @@ func main() {
 	if err := client.Run(nil); err != nil {
 		logger.Log("op", "startup", "error", err, "msg", "failed to run k8s client")
 	}
+}
+
+func (c *controller) SetGateway(l log.Logger, gw *gatewayapi_v1alpha1.Gateway) k8s.SyncState {
+
+	fmt.Println("---got a gateway! ", gw)
+
+	return k8s.SyncStateError
 }
